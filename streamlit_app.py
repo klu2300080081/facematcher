@@ -11,14 +11,14 @@ import os
 import io
 import pickle
 
-# Define VGGNet class (assuming it's used for feature extraction)
+# Define VGGNet class
 class VGGNet(nn.Module):
     def __init__(self):
         super(VGGNet, self).__init__()
         vgg = models.vgg16(pretrained=True)
         self.features = vgg.features
         self.avgpool = vgg.avgpool
-        self.classifier = nn.Sequential(*list(vgg.classifier.children())[:-1])  # Remove final layer
+        self.classifier = nn.Sequential(*list(vgg.classifier.children())[:-1])
 
     def forward(self, x):
         x = self.features(x)
@@ -32,37 +32,48 @@ class VGGNet(nn.Module):
 def load_vgg_model():
     model = VGGNet()
     model.eval()
-    device = torch.device("cpu")  # Streamlit Cloud uses CPU
+    device = torch.device("cpu")
     model.to(device)
     st.info("Loaded VGG16 model.")
     return model
 
-# Load gender classifier (assuming a simple CNN)
+# Define GenderClassifier (adjust based on training architecture)
+class GenderClassifier(nn.Module):
+    def __init__(self):
+        super(GenderClassifier, self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        # Adjust fc1 input size based on 224x224 input
+        self.fc1 = nn.Linear(32 * 56 * 56, 128)  # Updated for 224x224
+        self.fc2 = nn.Linear(128, 2)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = x.view(-1, 32 * 56 * 56)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# Load gender classifier
 @st.cache_resource
 def load_gender_model():
-    class GenderClassifier(nn.Module):
-        def __init__(self):
-            super(GenderClassifier, self).__init__()
-            self.conv1 = nn.Conv2d(3, 16, 3)
-            self.pool = nn.MaxPool2d(2, 2)
-            self.conv2 = nn.Conv2d(16, 32, 3)
-            self.fc1 = nn.Linear(32 * 54 * 54, 128)  # Adjust based on input size
-            self.fc2 = nn.Linear(128, 2)  # Male/Female
-
-        def forward(self, x):
-            x = self.pool(torch.relu(self.conv1(x)))
-            x = self.pool(torch.relu(self.conv2(x)))
-            x = x.view(-1, 32 * 54 * 54)
-            x = torch.relu(self.fc1(x))
-            x = self.fc2(x)
-            return x
-
     model = GenderClassifier()
-    model.load_state_dict(torch.load("gender_classifier.pt", map_location=torch.device("cpu")))
-    model.eval()
-    device = torch.device("cpu")
-    model.to(device)
-    st.info("Loaded gender classifier.")
+    try:
+        state_dict = torch.load("gender_classifier.pt", map_location=torch.device("cpu"))
+        model.load_state_dict(state_dict, strict=False)  # Allow partial loading
+        mismatched_keys = [k for k in state_dict.keys() if k not in model.state_dict()]
+        if mismatched_keys:
+            st.warning(f"Mismatched keys in gender_classifier.pt: {mismatched_keys}")
+        model.eval()
+        device = torch.device("cpu")
+        model.to(device)
+        st.info("Loaded gender classifier.")
+    except Exception as e:
+        st.error(f"Failed to load gender_classifier.pt: {e}")
+        return None  # Disable gender prediction if loading fails
     return model
 
 # Preprocess image for gender prediction
@@ -74,7 +85,7 @@ def preprocess_gender(image):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     image = transform(image)
-    image = image.unsqueeze(0)  # Add batch dimension
+    image = image.unsqueeze(0)
     return image
 
 # Detect face using Haar Cascade
@@ -84,9 +95,9 @@ def detect_face(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     if len(faces) > 0:
-        x, y, w, h = faces[0]  # Use first detected face
+        x, y, w, h = faces[0]
         face = image[y:y+h, x:x+w]
-        return cv2.resize(face, (224, 224))  # Resize for VGG16
+        return cv2.resize(face, (224, 224))
     return None
 
 # Extract features using VGG16
@@ -98,7 +109,7 @@ def extract_features(vgg_model, image):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     image = transform(image)
-    image = image.unsqueeze(0)  # Add batch dimension
+    image = image.unsqueeze(0)
     device = torch.device("cpu")
     image = image.to(device)
     with torch.no_grad():
@@ -113,12 +124,11 @@ def prepare_datasets():
     
     if os.path.exists(male_data_path):
         male_df = pd.read_pickle(male_data_path)
-        # Convert absolute paths to relative
         male_df['image_path'] = male_df['image_path'].apply(
             lambda x: os.path.relpath(x, start=os.getcwd()).replace('\\', '/')
         )
     else:
-        male_df = pd.DataFrame()  # Placeholder, adjust as needed
+        male_df = pd.DataFrame()
     
     if os.path.exists(female_data_path):
         female_df = pd.read_pickle(female_data_path)
@@ -139,7 +149,6 @@ def generate_face_patterns(vgg_model, male_df, female_df):
     male_patterns_df = None
     female_patterns_df = None
 
-    # Try loading cached patterns
     if os.path.exists(male_patterns_path):
         try:
             male_patterns_df = pd.read_pickle(male_patterns_path)
@@ -156,7 +165,6 @@ def generate_face_patterns(vgg_model, male_df, female_df):
             st.warning(f"Failed to load Femalepatterns.pkl: {e}. Regenerating patterns.")
             female_patterns_df = None
 
-    # Regenerate patterns if not loaded
     if male_patterns_df is None:
         male_patterns = []
         for idx, row in male_df.iterrows():
@@ -205,6 +213,9 @@ def predict_celebrity(input_image, vgg_model, gender_model, male_patterns_df, fe
     face = detect_face(input_image)
     if face is None:
         return None, None, "No face detected"
+
+    if gender_model is None:
+        return None, None, "Gender model failed to load"
 
     # Predict gender
     gender_input = preprocess_gender(face)
@@ -268,7 +279,7 @@ def main():
             # Display input image
             st.image(input_image, caption="Input Image", use_column_width=True)
             
-            # Display celebrity image with error handling
+            # Display celebrity image
             if celebrity_image_path and os.path.exists(celebrity_image_path):
                 try:
                     st.image(celebrity_image_path, caption=celebrity_name, use_column_width=True)
@@ -278,7 +289,7 @@ def main():
             else:
                 st.write(f"Celebrity: {celebrity_name} (Image not available)")
         else:
-            st.error(gender)  # Error message like "No face detected"
+            st.error(gender)  # Error message
 
 if __name__ == "__main__":
     main()
